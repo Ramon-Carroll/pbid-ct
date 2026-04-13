@@ -1,26 +1,22 @@
 #!/usr/bin/env python3
 """
 pbid-ct.py  --  Power BI Desktop Control Tool
-Generic pbi-cli report wrapper for any PBIR (.pbip) project.
 
 Subcommands:
   open   -- Open a .pbip file in Power BI Desktop
   close  -- Close Power BI Desktop
-  run    -- Full cycle: close Desktop, run pbi-cli script, reopen Desktop
+  save   -- Close Desktop if open, then reopen to pick up file changes
 
 Usage:
   python pbid-ct.py open [--pbip path/to/Report.pbip]
   python pbid-ct.py close
-  python pbid-ct.py run <script-file> [--pbip path/to/Report.pbip]
+  python pbid-ct.py save [--pbip path/to/Report.pbip]
 
 The .pbip file is auto-detected from CWD (and one level of subdirs) if --pbip is omitted.
-Script files contain pbi-cli commands (one per line). Blank lines and lines
-starting with # or // are ignored. Use --no-sync on write commands.
 """
 
 import argparse
 import os
-import shlex
 import subprocess
 import sys
 import time
@@ -87,30 +83,6 @@ def kill_pbi(pid: int) -> None:
     time.sleep(2.0)  # OneDrive sync settling delay
 
 
-def clear_readonly_dirs(path: Path) -> None:
-    """Strip ReadOnly attribute from all directories under path.
-
-    OneDrive marks placeholder directories ReadOnly. Python's shutil.rmtree
-    treats this as Access Denied. Clearing with attrib before pbi-cli runs
-    avoids the error on delete operations.
-    """
-    subprocess.run(
-        ["attrib", "-R", str(path / "*"), "/S", "/D"],
-        capture_output=True,
-    )
-
-
-def parse_script(script_path: Path) -> list[str]:
-    """Return non-blank, non-comment lines from script file."""
-    commands = []
-    with open(script_path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and not line.startswith("//"):
-                commands.append(line)
-    return commands
-
-
 # ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
@@ -134,45 +106,18 @@ def cmd_close(args: argparse.Namespace) -> None:
         print("PBI Desktop is not open.", flush=True)
 
 
-def cmd_run(args: argparse.Namespace) -> None:
-    """Full cycle: close Desktop, run pbi-cli script, reopen Desktop."""
-    script_path = Path(args.script).resolve()
-    if not script_path.exists():
-        print(f"Error: Script not found: {script_path}", flush=True)
-        sys.exit(1)
-
-    pbip_path = resolve_pbip(args.pbip)
-    report_path = pbip_path.parent / (pbip_path.stem + ".Report")
-    if not report_path.exists():
-        print(f"Error: Report folder not found: {report_path}", flush=True)
-        sys.exit(1)
-
-    print(f"Project: {pbip_path.name}", flush=True)
-
+def cmd_save(args: argparse.Namespace) -> None:
+    """Close Desktop if open, then reopen to pick up file changes on disk."""
     pid = find_pbi_pid()
     if pid:
-        print(f"PBI Desktop is open (PID {pid}). Closing to apply report changes...", flush=True)
+        pbip_path = resolve_pbip(args.pbip)
+        print(f"PBI Desktop is open (PID {pid}). Closing to pick up changes...", flush=True)
         kill_pbi(pid)
-        was_open = True
-    else:
-        print("PBI Desktop is not open. Applying report changes to disk...", flush=True)
-        was_open = False
-
-    clear_readonly_dirs(report_path)
-
-    os.chdir(report_path)
-    for cmd in parse_script(script_path):
-        print(f"  {cmd}", flush=True)
-        result = subprocess.run(shlex.split(cmd))
-        if result.returncode != 0:
-            print(f"Error: command failed with exit code {result.returncode}", flush=True)
-            sys.exit(result.returncode)
-
-    if was_open:
-        print("Reopening PBI Desktop...", flush=True)
+        print(f"Reopening {pbip_path.name}...", flush=True)
         os.startfile(str(pbip_path))
-
-    print("Done.", flush=True)
+        print("Done.", flush=True)
+    else:
+        print("PBI Desktop is not open. Changes are on disk.", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +126,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="pbi-cli report wrapper — open, close, or run a full write cycle.",
+        description="Power BI Desktop lifecycle manager — open, close, or reload after file changes.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -193,12 +138,11 @@ def main() -> None:
     # close
     subparsers.add_parser("close", help="Close Power BI Desktop")
 
-    # run
-    p_run = subparsers.add_parser(
-        "run", help="Close Desktop, run pbi-cli script, reopen Desktop"
+    # save
+    p_save = subparsers.add_parser(
+        "save", help="Close Desktop if open, reopen to pick up file changes"
     )
-    p_run.add_argument("script", help="Script file containing pbi-cli commands (one per line)")
-    p_run.add_argument("--pbip", help="Path to the .pbip file (auto-detected if omitted)")
+    p_save.add_argument("--pbip", help="Path to the .pbip file (auto-detected if omitted)")
 
     args = parser.parse_args()
 
@@ -206,8 +150,8 @@ def main() -> None:
         cmd_open(args)
     elif args.command == "close":
         cmd_close(args)
-    elif args.command == "run":
-        cmd_run(args)
+    elif args.command == "save":
+        cmd_save(args)
 
 
 if __name__ == "__main__":
